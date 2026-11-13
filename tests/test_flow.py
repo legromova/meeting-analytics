@@ -427,3 +427,11 @@ def test_native_queue_configuration_and_identifier_only_payload(monkeypatch):
     monkeypatch.setitem(sys.modules,'vercel.queue.sync',fake)
     cloud.enqueue(42)
     assert messages==[('meeting-processing',{'meeting_id':42})]
+
+
+def test_cloud_and_local_dependency_manifests_match():
+    import tomllib
+    project=tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))
+    local=[line.strip() for line in Path('requirements.txt').read_text(encoding='utf-8').splitlines() if line.strip() and not line.startswith('#')]
+    assert project['project']['dependencies']==local
+    assert project['tool']['vercel']['subscribers']==[{'entrypoint':'worker'}]
