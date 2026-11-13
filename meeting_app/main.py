@@ -58,7 +58,7 @@ async def cloud_readiness(request, call_next):
 
 @app.get('/api/runtime')
 def runtime():
-    return {'cloud':cloud.enabled()}
+    return {'cloud':cloud.enabled(),'upload_limit_bytes':cloud.upload_limit() if cloud.enabled() else MAX_AUDIO*2}
 
 @app.get('/api/health')
 def health():

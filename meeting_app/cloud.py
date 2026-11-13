@@ -22,6 +22,13 @@ def missing():
     return absent
 
 
+def upload_limit():
+    try:
+        return max(1, min(int(os.getenv('MEETING_UPLOAD_LIMIT_BYTES', 200*1024*1024)), 200*1024*1024))
+    except ValueError:
+        return 200*1024*1024
+
+
 def storage():
     origin = os.environ['SUPABASE_URL'].rstrip('/')
     if urlparse(origin).scheme != 'https':
@@ -60,7 +67,8 @@ def put(path, source):
         response.raise_for_status()
 
 
-def download(path, destination, limit=200*1024*1024):
+def download(path, destination, limit=None):
+    limit = upload_limit() if limit is None else limit
     base, bucket = storage()
     size = 0
     with httpx.Client(timeout=120, trust_env=False) as client:
@@ -70,7 +78,7 @@ def download(path, destination, limit=200*1024*1024):
                 for chunk in response.iter_bytes(1024*1024):
                     size += len(chunk)
                     if size > limit:
-                        raise ValueError('Размер файла превышает 200 МиБ')
+                        raise ValueError(f'Размер файла превышает {limit // (1024*1024)} МиБ')
                     out.write(chunk)
 
 

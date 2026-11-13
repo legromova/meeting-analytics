@@ -332,7 +332,7 @@ def test_cloud_setup_does_not_use_local_database(monkeypatch):
         health=c.get('/api/health')
         assert health.status_code==503 and 'DATABASE_URL' in health.json()['missing']
         assert c.get('/api/projects').status_code==503
-        assert c.get('/api/runtime').json()=={'cloud':True}
+        assert c.get('/api/runtime').json()['cloud'] is True
 
 
 def test_cloud_upload_owner_worker_and_private_media(client,monkeypatch):
@@ -451,3 +451,47 @@ def test_separate_cloud_database_password_supports_special_characters(monkeypatc
     monkeypatch.setenv('DATABASE_URL','postgresql://user:test-only@db.example/postgres')
     assert 'password' not in connection_options()
     assert 'MEETING_DATABASE_PASSWORD' not in cloud.missing()
+
+
+def test_cloud_playback_fits_storage_without_modifying_original(tmp_path,monkeypatch):
+    from meeting_app import cloud,incoming
+    monkeypatch.setattr(cloud,'enabled',lambda:True)
+    monkeypatch.setenv('MEETING_UPLOAD_LIMIT_BYTES','50000')
+    source=tmp_path/'large.wav'
+    with wave.open(str(source),'wb') as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(4)
+        wav.setframerate(44100)
+        wav.writeframes(b'\x00'*(44100*4*2))
+    original=source.read_bytes()
+    result,kind=incoming.playback_copy(source)
+    assert kind in ('flac','mp3')
+    assert 0<result.stat().st_size<=50000
+    assert source.read_bytes()==original
+    if kind=='flac':
+        from mutagen.flac import FLAC
+        assert FLAC(result).info.bits_per_sample==32
+
+
+def test_cloud_upload_declared_limit_is_enforced_before_storage(client,monkeypatch):
+    from meeting_app import cloud,postgres
+    import sqlite3
+    c=client
+    c.post('/api/bootstrap',json={'email':'limit@test','password':'password1234'})
+    h=login(c,'limit@test','password1234')
+    pid=c.post('/api/projects',headers=h,json={'name':'Limit'}).json()['id']
+    monkeypatch.setenv('MEETING_CLOUD','1')
+    monkeypatch.setenv('DATABASE_URL','test-local-adapter')
+    monkeypatch.setenv('MEETING_UPLOAD_LIMIT_BYTES','52428800')
+    main.app.state.configured=True
+    def local_connection(url):
+        conn=sqlite3.connect(db.DB_PATH)
+        conn.row_factory=sqlite3.Row
+        return conn
+    monkeypatch.setattr(postgres,'Connection',local_connection)
+    called=[]
+    monkeypatch.setattr(cloud,'signed',lambda *a,**kw:called.append(True))
+    response=c.post('/api/cloud/uploads',headers=h,json={'project_id':pid,'filename':'big.mp4','size':52428801,'meeting_at':'2026-11-13T12:00'})
+    assert response.status_code==400 and '50' in response.json()['detail']
+    assert called==[]
+    assert c.get('/api/runtime').json()['upload_limit_bytes']==52428800

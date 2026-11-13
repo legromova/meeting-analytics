@@ -26,8 +26,8 @@ def install(app, owned, inspect_audio):
         if ext not in ('.mp4','.webm','.mp3','.m4a','.wav'):
             raise HTTPException(400,'Поддерживаются MP4, WebM, MP3, M4A и WAV')
         size = data.get('size')
-        if not isinstance(size,int) or size <= 0 or size > incoming.MAX_VIDEO:
-            raise HTTPException(400,'Пустой файл или размер превышает 200 МиБ')
+        if not isinstance(size,int) or size <= 0 or size > cloud.upload_limit():
+            raise HTTPException(400,f'Пустой файл или размер превышает {cloud.upload_limit() // (1024*1024)} МиБ')
         when = str(data.get('meeting_at',''))
         try:
             datetime.fromisoformat(when)

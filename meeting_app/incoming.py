@@ -141,6 +141,26 @@ def recover(conn):
         conn.execute('UPDATE meetings SET status=?,stage=NULL,error=? WHERE id=?', (state, 'Обработка прерывалась три раза. Повторите обработку.' if state == 'error' else None, job['meeting_id']))
 
 
+def playback_copy(source):
+    """Keep PCM when it fits; try lossless FLAC before the documented MP3 fallback."""
+    if not cloud.enabled() or source.stat().st_size <= cloud.upload_limit():
+        return source, 'wav'
+    compressed = source.with_suffix('.flac')
+    try:
+        subprocess.run([ffmpeg(), '-y', '-v', 'error', '-i', str(source), '-c:a', 'flac', '-bits_per_raw_sample', '32', str(compressed)], check=True, capture_output=True, timeout=90)
+        from mutagen.flac import FLAC
+        if 0 < compressed.stat().st_size <= cloud.upload_limit() and FLAC(compressed).info.bits_per_sample == 32:
+            return compressed, 'flac'
+    except (OSError, subprocess.SubprocessError):
+        pass
+    compressed.unlink(missing_ok=True)
+    compressed = source.with_suffix('.mp3')
+    subprocess.run([ffmpeg(), '-y', '-v', 'error', '-i', str(source), '-vn', '-ac', '1', '-b:a', '64k', str(compressed)], check=True, capture_output=True, timeout=90)
+    if not 0 < compressed.stat().st_size <= cloud.upload_limit():
+        raise ValueError('Аудиокопия превышает лимит хранилища')
+    return compressed, 'mp3'
+
+
 def process_one(meeting_id=None):
     with LOCK, db.connect() as conn:
         conn.execute('BEGIN IMMEDIATE')
@@ -185,18 +205,19 @@ def process_one(meeting_id=None):
         results = ai.Results.model_validate(ai.analyze(segments, m['title'], m['meeting_at'], m['project_name'], m['display_name'], json.loads(m['aliases']))).model_dump()
         ai.validate_evidence(results, segments, m['audio_duration'], m['display_name'], json.loads(m['aliases']))
         stage('Сохранение результатов')
+        playback_path, playback_format = playback_copy(temporary) if m['source_type'] == 'video' else (temporary, m['audio_format'])
         with LOCK, db.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             if not conn.execute("SELECT 1 FROM jobs WHERE meeting_id=? AND token=? AND state='processing' AND lease>?", (m['id'], token, time.time())).fetchone():
                 return True
-            audio_name = m['audio_name'] or (uuid.uuid4().hex + '.wav')
+            audio_name = m['audio_name'] if m['audio_name'] and m['audio_name'].endswith('.'+playback_format) else uuid.uuid4().hex+'.'+playback_format
             audio_target = safe(db.AUDIO_DIR / audio_name)
             if m["source_type"] == "video":
-                temporary.replace(audio_target)
+                playback_path.replace(audio_target)
                 if cloud.enabled():
                     cloud.put("audio/"+audio_name,audio_target)
             sync_tasks(conn, m, results)
-            conn.execute("UPDATE meetings SET status='ready',stage=NULL,error=NULL,results=?,audio_name=?,audio_format=?,processed_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(results, ensure_ascii=False), audio_name, "wav" if m["source_type"] == "video" else m["audio_format"], m['id']))
+            conn.execute("UPDATE meetings SET status='ready',stage=NULL,error=NULL,results=?,audio_name=?,audio_format=?,processed_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(results, ensure_ascii=False), audio_name, playback_format, m['id']))
             conn.execute("UPDATE jobs SET state='ready',interruptions=0,token=NULL,lease=NULL WHERE meeting_id=? AND token=?", (m['id'], token))
     except Exception as exc:
         from openai import APIConnectionError, AuthenticationError, PermissionDeniedError, RateLimitError
@@ -221,6 +242,8 @@ def process_one(meeting_id=None):
         if m["source_type"] == "video" or cloud.enabled():
             temporary.unlink(missing_ok=True)
         if cloud.enabled():
+            for suffix in ('.flac','.mp3'):
+                temporary.with_suffix(suffix).unlink(missing_ok=True)
             if source_path:
                 source_path.unlink(missing_ok=True)
             if audio_target:
