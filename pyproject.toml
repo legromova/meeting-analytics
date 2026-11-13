@@ -1,0 +1,2 @@
+[[tool.vercel.subscribers]]
+entrypoint = "worker"

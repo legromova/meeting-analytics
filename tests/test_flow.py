@@ -409,3 +409,21 @@ def test_postgres_query_adapter_preserves_parameters(monkeypatch):
     assert "to_char(now()" in seen[-1][0] and seen[-1][1]==(1,)
     connection.execute('BEGIN IMMEDIATE')
     assert 'pg_advisory_xact_lock' in seen[-1][0]
+
+
+def test_native_queue_configuration_and_identifier_only_payload(monkeypatch):
+    import sys
+    from types import ModuleType
+    from meeting_app import cloud
+    for key in cloud.REQUIRED:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv('MEETING_QUEUE_PROVIDER','vercel')
+    assert 'QSTASH_TOKEN' not in cloud.missing()
+    assert 'MEETING_WORKER_SECRET' not in cloud.missing()
+    assert 'DATABASE_URL' in cloud.missing()
+    messages=[]
+    fake=ModuleType('vercel.queue.sync')
+    fake.send=lambda topic,payload:messages.append((topic,payload))
+    monkeypatch.setitem(sys.modules,'vercel.queue.sync',fake)
+    cloud.enqueue(42)
+    assert messages==[('meeting-processing',{'meeting_id':42})]

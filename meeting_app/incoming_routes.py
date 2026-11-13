@@ -137,6 +137,6 @@ def install(app, owned, public_meeting, save_upload):
             except Exception:
                 with db.connect() as conn:
                     conn.execute("UPDATE jobs SET state='error' WHERE meeting_id=? AND state='uploaded'",(meeting_id,))
-                    conn.execute("UPDATE meetings SET status='error',error='Не удалось запустить очередь. Проверьте QStash.' WHERE id=? AND status='uploaded'",(meeting_id,))
-                raise HTTPException(503,'Не удалось запустить очередь. Проверьте QStash.')
+                    conn.execute("UPDATE meetings SET status='error',error='Не удалось запустить очередь. Проверьте подключение очереди.' WHERE id=? AND status='uploaded'",(meeting_id,))
+                raise HTTPException(503,'Не удалось запустить очередь. Проверьте подключение очереди.')
         return {'ok': True}

@@ -12,7 +12,10 @@ def enabled():
 
 
 def missing():
-    return [key for key in REQUIRED if not os.getenv(key)]
+    keys = REQUIRED
+    if os.getenv('MEETING_QUEUE_PROVIDER') == 'vercel':
+        keys = tuple(key for key in keys if key not in ('QSTASH_TOKEN','MEETING_WORKER_SECRET','MEETING_PUBLIC_URL'))
+    return [key for key in keys if not os.getenv(key)]
 
 
 def storage():
@@ -75,6 +78,9 @@ def delete(path):
 
 
 def enqueue(mid):
+    if os.getenv('MEETING_QUEUE_PROVIDER') == 'vercel':
+        from vercel.queue.sync import send
+        return send('meeting-processing', {'meeting_id': mid})
     url = os.environ['MEETING_PUBLIC_URL'].rstrip('/')+'/api/cloud/worker'
     if urlparse(url).scheme != 'https':
         raise ValueError('Worker must use HTTPS')

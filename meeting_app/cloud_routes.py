@@ -87,7 +87,7 @@ def install(app, owned, inspect_audio):
                 # Persist error instead of leaving accepted jobs permanently waiting.
                 with db.connect() as conn:
                     conn.execute("UPDATE jobs SET state='error' WHERE meeting_id=? AND state='uploaded'",(mid,))
-                    conn.execute("UPDATE meetings SET status='error',error='Не удалось поставить задание в облачную очередь. Проверьте QStash и повторите обработку.' WHERE id=? AND status='uploaded'",(mid,))
+                    conn.execute("UPDATE meetings SET status='error',error='Не удалось поставить задание в облачную очередь. Проверьте подключение очереди и повторите обработку.' WHERE id=? AND status='uploaded'",(mid,))
             try:
                 cloud.delete(row['path'])
             except Exception:

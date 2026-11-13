@@ -6,3 +6,5 @@ mutagen>=1.47,<2
 imageio-ffmpeg>=0.6,<1
 truststore>=0.10,<1
 psycopg[binary]>=3.2,<4
+
+vercel-queue; python_version >= "3.12"

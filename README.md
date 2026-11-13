@@ -86,4 +86,4 @@ $env:MEETING_ANALYSIS_MODEL = 'gpt-4.1-mini'
 
 ## Публикация в Vercel
 
-Сохраняется локальный режим Windows. Для облачного режима с PostgreSQL, приватным хранилищем и HTTP-очередью следуйте [DEPLOYMENT.md](DEPLOYMENT.md). Переменные `OPENAI_API_KEY` и подключения задаются только в настройках Vercel; локальные данные и DPAPI-файл в деплой не включаются.
+Сохраняется локальный режим Windows. Для облачного режима с PostgreSQL, приватным хранилищем и встроенной очередью Vercel Queues следуйте [DEPLOYMENT.md](DEPLOYMENT.md). Переменные `OPENAI_API_KEY` и подключения задаются только в настройках Vercel; локальные данные и DPAPI-файл в деплой не включаются.
