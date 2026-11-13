@@ -14,6 +14,7 @@ from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .db import DATA_DIR
+from . import cloud
 from .security import unprotect
 
 KEY_FILE = DATA_DIR / "openai.key.dpapi"
@@ -22,7 +23,7 @@ ANALYSIS_MODEL = os.getenv("MEETING_ANALYSIS_MODEL", "gpt-4.1-mini")
 
 
 def key_present():
-    return KEY_FILE.is_file()
+    return bool(os.getenv("OPENAI_API_KEY")) if cloud.enabled() else KEY_FILE.is_file()
 
 
 def client():
@@ -34,8 +35,8 @@ def client():
                          urlsplit(v).port == 9) for v in proxy_values if v)
     transport = httpx.Client(verify=truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
                              trust_env=not blocked_proxy)
-    return OpenAI(api_key=unprotect(KEY_FILE.read_bytes()), http_client=transport,
-                  timeout=120, max_retries=1)
+    return OpenAI(api_key=os.environ["OPENAI_API_KEY"] if cloud.enabled() else unprotect(KEY_FILE.read_bytes()), http_client=transport,
+                  timeout=90 if cloud.enabled() else 120, max_retries=0 if cloud.enabled() else 1)
 
 
 class Item(BaseModel):

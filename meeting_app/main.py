@@ -11,24 +11,35 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from mutagen import File as AudioFile
 from pydantic import BaseModel, Field
 
-from . import ai, incoming
+from . import ai, incoming, cloud
 from .db import AUDIO_DIR, DATA_DIR, connect, migrate
 from .security import current_user, hash_password, protect, verify_password
 
 @asynccontextmanager
 async def lifespan(_app):
-    migrate()
-    service = incoming.Service()
-    service.start()
-    try:
+    if cloud.enabled():
+        _app.state.configured = False
+        if not cloud.missing():
+            try:
+                migrate()
+                _app.state.configured = True
+            except Exception:
+                pass  # No DSN or raw database exception in logs or public responses.
         yield
-    finally:
-        service.close()
+    else:
+        migrate()
+        service = incoming.Service()
+        service.start()
+        try:
+            yield
+        finally:
+            service.close()
+
 
 
 app = FastAPI(title="Встречи и задачи", docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -38,6 +49,30 @@ pending = {}  # meeting_id -> transient transcript; never written to disk
 pending_lock = threading.Lock()
 MAX_AUDIO = 100 * 1024 * 1024
 MAX_TEXT = 2 * 1024 * 1024
+
+@app.middleware('http')
+async def cloud_readiness(request, call_next):
+    if cloud.enabled() and not getattr(app.state,'configured',False) and request.url.path not in ('/','/api/health','/api/runtime') and not request.url.path.startswith('/static/'):
+        return JSONResponse({'detail':'Облачное подключение ещё не настроено. Следуйте DEPLOYMENT.md.'},status_code=503)
+    return await call_next(request)
+
+@app.get('/api/runtime')
+def runtime():
+    return {'cloud':cloud.enabled()}
+
+@app.get('/api/health')
+def health():
+    ready = not cloud.enabled() or getattr(app.state,'configured',False)
+    return JSONResponse({'status':'ok' if ready else 'setup_required','cloud':cloud.enabled(),'missing':cloud.missing() if cloud.enabled() else []},status_code=200 if ready else 503)
+
+def remove_media(kind,name):
+    if not name:
+        return
+    if cloud.enabled():
+        cloud.delete(kind+'/'+name)
+    else:
+        incoming.safe(DATA_DIR/kind/name).unlink(missing_ok=True)
+
 
 
 def rowdict(row):
@@ -76,6 +111,7 @@ class Login(BaseModel):
 
 class NewUser(Login):
     display_name: str = ""
+    bootstrap_token: str = ""
 
 
 class Password(BaseModel):
@@ -117,6 +153,8 @@ def valid_date(value):
 
 @app.get("/", response_class=HTMLResponse)
 def index():
+    if cloud.enabled() and not getattr(app.state,'configured',False):
+        return (STATIC/'setup.html').read_text(encoding='utf-8')
     return (STATIC / "index.html").read_text(encoding="utf-8")
 
 
@@ -124,12 +162,15 @@ def index():
 def bootstrap():
     with connect() as db:
         exists = db.execute("SELECT 1 FROM users LIMIT 1").fetchone()
-    return {"needs_admin": not bool(exists)}
+    return {"needs_admin": not bool(exists), "cloud":cloud.enabled()}
 
 
 @app.post("/api/bootstrap")
 def create_admin(data: NewUser):
+    if cloud.enabled() and (not os.getenv('MEETING_BOOTSTRAP_TOKEN') or not secrets.compare_digest(data.bootstrap_token,os.environ['MEETING_BOOTSTRAP_TOKEN'])):
+        raise HTTPException(403,'Неверный код первоначальной настройки')
     with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
         if db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
             raise HTTPException(403, "Администратор уже создан")
         db.execute("INSERT INTO users(email,password_hash,role,display_name) VALUES(?,?,?,?)",
@@ -165,7 +206,7 @@ def logout(request: Request, response: Response, user=Depends(current_user)):
 def me(user=Depends(current_user)):
     return {"id": user["id"], "email": user["email"], "role": user["role"],
             "display_name": user["display_name"], "aliases": json.loads(user["aliases"]),
-            "must_change_password": bool(user["must_change_password"]), "csrf": user["csrf"]}
+            "must_change_password": bool(user["must_change_password"]), "csrf": user["csrf"], "cloud":cloud.enabled()}
 
 
 @app.patch("/api/me")
@@ -219,9 +260,9 @@ def delete_user(user_id: int, user=Depends(require_admin)):
         videos = [r[0] for r in db.execute("SELECT video_name FROM meetings WHERE owner_id=? AND video_name IS NOT NULL", (user_id,))]
         db.execute("DELETE FROM users WHERE id=?", (user_id,))
     for name in videos:
-        incoming.safe(DATA_DIR / "video" / name).unlink(missing_ok=True)
+        remove_media("video",name)
     for name in names:
-        (AUDIO_DIR / name).unlink(missing_ok=True)
+        remove_media("audio",name)
     return {"ok": True}
 
 
@@ -233,6 +274,8 @@ def settings(user=Depends(require_admin)):
 
 @app.put("/api/admin/key")
 def set_key(data: dict, user=Depends(require_admin)):
+    if cloud.enabled():
+        raise HTTPException(409,"В облаке задайте OPENAI_API_KEY в переменных Vercel и выполните Redeploy")
     key = str(data.get("key", "")).strip()
     if not key.startswith("sk-") or len(key) < 20:
         raise HTTPException(400, "Укажите действительный ключ OpenAI")
@@ -289,9 +332,9 @@ def delete_project(project_id: int, user=Depends(current_user)):
         videos = [r[0] for r in db.execute("SELECT video_name FROM meetings WHERE project_id=? AND video_name IS NOT NULL", (project_id,))]
         db.execute("DELETE FROM projects WHERE id=?", (project_id,))
     for name in videos:
-        incoming.safe(DATA_DIR / "video" / name).unlink(missing_ok=True)
+        remove_media("video",name)
     for name in names:
-        (AUDIO_DIR / name).unlink(missing_ok=True)
+        remove_media("audio",name)
     return {"ok": True}
 
 
@@ -339,6 +382,8 @@ async def save_upload(upload, path, limit):
 async def create_meeting(project_id: int = Form(...), title: str = Form(...), meeting_at: str = Form(...),
                          transcript: str = Form(""), file: UploadFile | None = File(None),
                          user=Depends(current_user)):
+    if cloud.enabled():
+        raise HTTPException(409,"В облаке используйте прямую загрузку в хранилище")
     owned("projects", project_id, user["id"])
     if not title.strip() or len(title) > 300:
         raise HTTPException(400, "Укажите название встречи")
@@ -497,6 +542,8 @@ def audio(meeting_id: int, user=Depends(current_user)):
     row = owned("meetings", meeting_id, user["id"])
     if not row["audio_name"]:
         raise HTTPException(404, "Аудио не найдено")
+    if cloud.enabled():
+        return RedirectResponse(cloud.signed("audio/"+row["audio_name"]),status_code=307)
     path = AUDIO_DIR / row["audio_name"]
     if not path.is_file():
         raise HTTPException(404, "Аудиофайл отсутствует")
@@ -513,9 +560,9 @@ def delete_meeting(meeting_id: int, user=Depends(current_user)):
     with pending_lock:
         pending.pop(meeting_id, None)
     if row["video_name"]:
-        incoming.safe(DATA_DIR / "video" / row["video_name"]).unlink(missing_ok=True)
+        remove_media("video",row["video_name"])
     if row["audio_name"]:
-        (AUDIO_DIR / row["audio_name"]).unlink(missing_ok=True)
+        remove_media("audio",row["audio_name"])
     return {"ok": True}
 
 
@@ -576,3 +623,6 @@ def delete_task(task_id: int, user=Depends(current_user)):
 
 from .incoming_routes import install
 install(app, owned, public_meeting, save_upload)
+
+from .cloud_routes import install as install_cloud
+install_cloud(app, owned, inspect_audio)

@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from meeting_app.db import AUDIO_DIR, DB_PATH, DATA_DIR
+from meeting_app import cloud
 
 def skip_links(folder, names):
     return [name for name in names if (Path(folder) / name).is_symlink() or getattr((Path(folder) / name).lstat(), "st_file_attributes", 0) & 0x400]
@@ -16,6 +17,8 @@ def main():
     parser = argparse.ArgumentParser(description="Резервная копия встреч и аудио")
     parser.add_argument("destination", type=Path, help="Каталог, в котором создать копию")
     args = parser.parse_args()
+    if cloud.enabled():
+        parser.error("Cloud mode: use PostgreSQL and private storage backups from the provider")
     if not DB_PATH.is_file():
         parser.error("База ещё не создана")
     target = args.destination.resolve() / ("meetings-" + datetime.now().strftime("%Y%m%d-%H%M%S"))

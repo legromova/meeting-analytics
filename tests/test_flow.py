@@ -319,3 +319,93 @@ def test_migration_preserves_populated_v1(tmp_path,monkeypatch):
         assert conn.execute('SELECT title FROM meetings').fetchone()[0]=='Old'
         assert not conn.execute('PRAGMA foreign_key_check').fetchall()
         conn.execute("INSERT INTO meetings(owner_id,project_id,title,meeting_at,source_type) VALUES(1,1, 'New','2026-11-13','video')")
+
+
+def test_cloud_setup_does_not_use_local_database(monkeypatch):
+    from meeting_app import cloud
+    monkeypatch.setenv('MEETING_CLOUD','1')
+    for key in cloud.REQUIRED:
+        monkeypatch.delenv(key,raising=False)
+    with TestClient(main.app) as c:
+        page=c.get('/')
+        assert page.status_code==200 and 'DEPLOYMENT.md' in page.text
+        health=c.get('/api/health')
+        assert health.status_code==503 and 'DATABASE_URL' in health.json()['missing']
+        assert c.get('/api/projects').status_code==503
+        assert c.get('/api/runtime').json()=={'cloud':True}
+
+
+def test_cloud_upload_owner_worker_and_private_media(client,monkeypatch):
+    import sqlite3
+    from meeting_app import cloud,postgres,incoming
+    monkeypatch.setenv('MEETING_CLOUD','1')
+    monkeypatch.setenv('MEETING_BOOTSTRAP_TOKEN','test-bootstrap-code')
+    monkeypatch.setenv('MEETING_WORKER_SECRET','test-worker-code')
+    main.app.state.configured=True
+    def local_connection(url):
+        conn=sqlite3.connect(db.DB_PATH,timeout=30)
+        conn.row_factory=sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        return conn
+    monkeypatch.setattr(postgres,'Connection',local_connection)
+    monkeypatch.setenv('DATABASE_URL','test-local-adapter')
+    with db.connect() as conn:
+        conn.execute('CREATE TABLE uploads(id TEXT PRIMARY KEY,owner_id INTEGER,project_id INTEGER,path TEXT,title TEXT,meeting_at TEXT,filename TEXT,created_at REAL,meeting_id INTEGER)')
+    monkeypatch.setattr(cloud,'signed',lambda path,upload=False:'https://private.invalid/'+path)
+    assert client.post('/api/bootstrap',json={'email':'cloud@test','password':'password1234'}).status_code==403
+    assert client.post('/api/bootstrap',json={'email':'cloud@test','password':'password1234','bootstrap_token':'test-bootstrap-code','display_name':'Елена'}).status_code==200
+    h=login(client,'cloud@test','password1234')
+    pid=client.post('/api/projects',headers=h,json={'name':'Облако'}).json()['id']
+    data={'project_id':pid,'filename':'../../record.mp4','size':100,'meeting_at':'2026-11-13T12:00'}
+    assert client.post('/api/cloud/uploads',json=data).status_code==403
+    grant=client.post('/api/cloud/uploads',headers=h,json=data)
+    assert grant.status_code==200
+    assert '/uploads/1/' in grant.json()['url'] and '..' not in grant.json()['url']
+    upload_id=grant.json()['id']
+    monkeypatch.setattr(cloud,'download',lambda key,path:Path(path).write_bytes(b'video-original'))
+    monkeypatch.setattr(cloud,'put',lambda key,path:None)
+    monkeypatch.setattr(cloud,'delete',lambda key:None)
+    dispatched=[]
+    monkeypatch.setattr(cloud,'enqueue',lambda mid:dispatched.append(mid))
+    monkeypatch.setattr(incoming,'media',lambda p:('mp4',120))
+    monkeypatch.setattr(incoming,'process_one',lambda mid=None:False)
+    accepted=client.post(f'/api/cloud/uploads/{upload_id}/complete',headers=h)
+    assert accepted.status_code==202,accepted.text
+    mid=accepted.json()['id']
+    assert dispatched==[mid]
+    assert client.post(f'/api/cloud/uploads/{upload_id}/complete',headers=h).json()['id']==mid
+    media=client.get(f'/api/meetings/{mid}/video',follow_redirects=False)
+    assert media.status_code==307 and media.headers['location'].startswith('https://private.invalid/video/')
+    assert client.post('/api/cloud/worker',json={'meeting_id':mid}).status_code==403
+    assert client.post('/api/cloud/worker',headers={'X-Worker-Token':'test-worker-code'},json={'meeting_id':mid}).status_code==503
+    assert client.get(f'/api/projects/{pid}/incoming').json()['supported'] is False
+    assert client.put('/api/admin/key',headers=h,json={'key':'fake'}).status_code==409
+    client.post('/api/admin/users',headers=h,json={'email':'second@test','password':'password5678'})
+    client.cookies.clear()
+    other=login(client,'second@test','password5678')
+    assert client.post(f'/api/cloud/uploads/{upload_id}/complete',headers=other).status_code==404
+    assert client.get(f'/api/meetings/{mid}/video').status_code==404
+    assert client.post('/api/cloud/uploads',headers=other,json=data).status_code==404
+
+
+def test_postgres_query_adapter_preserves_parameters(monkeypatch):
+    from meeting_app.postgres import Connection
+    seen=[]
+    class RawCursor:
+        rowcount=1
+        description=[]
+        def fetchone(self):return [7]
+    class RawConnection:
+        def execute(self,sql,args=()):
+            seen.append((sql,args))
+            return RawCursor()
+    connection=object.__new__(Connection)
+    connection.conn=RawConnection()
+    cursor=connection.execute('INSERT OR IGNORE INTO tasks(owner_id,title) VALUES(?,?)',(1,'private task'))
+    assert cursor.lastrowid==7
+    assert seen[-1][0]=='INSERT INTO tasks(owner_id,title) VALUES(%s,%s) ON CONFLICT DO NOTHING RETURNING id'
+    assert seen[-1][1]==(1,'private task')
+    connection.execute("SELECT * FROM sessions WHERE expires_at>datetime('now') AND user_id=?",(1,))
+    assert "to_char(now()" in seen[-1][0] and seen[-1][1]==(1,)
+    connection.execute('BEGIN IMMEDIATE')
+    assert 'pg_advisory_xact_lock' in seen[-1][0]

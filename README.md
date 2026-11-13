@@ -83,3 +83,7 @@ $env:MEETING_ANALYSIS_MODEL = 'gpt-4.1-mini'
 - `GET/PUT /api/projects/{id}/incoming`: `{enabled,path}` / JSON `{enabled}`. Произвольные пути не принимаются.
 
 Облачное время обработки не фиксировано. Проверенная документация: [Speech-to-Text](https://developers.openai.com/api/docs/guides/speech-to-text), [Create transcription](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create): `diarized_json`, `chunking_strategy=auto`, лимит 25 МБ. Модель диаризации доступна существующим интеграциям до 26 февраля 2027 года; модели задаются переменными окружения из основного раздела README.
+
+## Публикация в Vercel
+
+Сохраняется локальный режим Windows. Для облачного режима с PostgreSQL, приватным хранилищем и HTTP-очередью следуйте [DEPLOYMENT.md](DEPLOYMENT.md). Переменные `OPENAI_API_KEY` и подключения задаются только в настройках Vercel; локальные данные и DPAPI-файл в деплой не включаются.

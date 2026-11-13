@@ -4,9 +4,9 @@ import uuid
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from fastapi import Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
-from . import db, incoming
+from . import db, incoming, cloud
 from .security import current_user
 
 
@@ -18,6 +18,8 @@ def install(app, owned, public_meeting, save_upload):
             datetime.fromisoformat(meeting_at)
         except ValueError:
             raise HTTPException(400, 'Укажите дату встречи')
+        if cloud.enabled():
+            raise HTTPException(409,'Используйте прямую облачную загрузку')
         filename = Path((file.filename or '').replace('\\', '/')).name
         if Path(filename).suffix.lower() not in ('.mp4', '.webm'):
             raise HTTPException(400, 'Поддерживаются WebM и MP4')
@@ -36,6 +38,8 @@ def install(app, owned, public_meeting, save_upload):
     @app.get('/api/projects/{project_id}/incoming')
     def folder_get(project_id: int, user=Depends(current_user)):
         owned('projects', project_id, user['id'])
+        if cloud.enabled():
+            return {'enabled':False,'path':'Импорт из локальной папки доступен в режиме Windows','supported':False}
         with db.connect() as conn:
             row = conn.execute('SELECT enabled FROM incoming_settings WHERE project_id=? AND owner_id=?', (project_id, user['id'])).fetchone()
         return {'enabled': bool(row and row[0]), 'path': str(db.DATA_DIR / 'incoming' / str(user['id']) / str(project_id))}
@@ -43,6 +47,8 @@ def install(app, owned, public_meeting, save_upload):
     @app.put('/api/projects/{project_id}/incoming')
     def folder_put(project_id: int, data: dict, user=Depends(current_user)):
         owned('projects', project_id, user['id'])
+        if cloud.enabled():
+            raise HTTPException(409,'Локальная папка доступна только в режиме Windows')
         folder = incoming.safe(incoming.directory('incoming') / str(user['id']) / str(project_id))
         folder.mkdir(parents=True, exist_ok=True)
         with db.connect() as conn:
@@ -106,6 +112,8 @@ def install(app, owned, public_meeting, save_upload):
         row = owned('meetings', meeting_id, user['id'])
         if not row['video_name']:
             raise HTTPException(404, 'Видео не найдено')
+        if cloud.enabled():
+            return RedirectResponse(cloud.signed('video/'+row['video_name']),status_code=307)
         path = incoming.safe(incoming.directory('video') / row['video_name'])
         if not path.is_file():
             raise HTTPException(404, 'Оригинал отсутствует')
@@ -114,7 +122,7 @@ def install(app, owned, public_meeting, save_upload):
     @app.post('/api/meetings/{meeting_id}/retry')
     def retry(meeting_id: int, user=Depends(current_user)):
         row = owned('meetings', meeting_id, user['id'])
-        if row['source_type'] != 'video':
+        if row['source_type'] != 'video' and not (cloud.enabled() and row['source_type']=='audio'):
             raise HTTPException(400, 'Повтор предназначен для видео')
         with incoming.LOCK, db.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
@@ -123,4 +131,12 @@ def install(app, owned, public_meeting, save_upload):
                 raise HTTPException(409, 'Повтор доступен только после ошибки')
             conn.execute("UPDATE jobs SET state='uploaded',interruptions=0,token=NULL,lease=NULL WHERE meeting_id=?", (meeting_id,))
             conn.execute("UPDATE meetings SET status='uploaded',stage=NULL,error=NULL WHERE id=?", (meeting_id,))
+        if cloud.enabled():
+            try:
+                cloud.enqueue(meeting_id)
+            except Exception:
+                with db.connect() as conn:
+                    conn.execute("UPDATE jobs SET state='error' WHERE meeting_id=? AND state='uploaded'",(meeting_id,))
+                    conn.execute("UPDATE meetings SET status='error',error='Не удалось запустить очередь. Проверьте QStash.' WHERE id=? AND status='uploaded'",(meeting_id,))
+                raise HTTPException(503,'Не удалось запустить очередь. Проверьте QStash.')
         return {'ok': True}

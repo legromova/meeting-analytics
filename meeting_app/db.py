@@ -1,13 +1,17 @@
 import os
 import sqlite3
 from pathlib import Path
+from . import cloud
 
-DATA_DIR = Path(os.getenv("MEETING_DATA_DIR", "data")).resolve()
+DATA_DIR = Path(os.getenv("MEETING_DATA_DIR", "/tmp/meeting-app" if cloud.enabled() else "data")).resolve()
 DB_PATH = DATA_DIR / "meetings.sqlite3"
 AUDIO_DIR = DATA_DIR / "audio"
 
 
 def connect():
+    if cloud.enabled():
+        from .postgres import Connection
+        return Connection(os.environ["DATABASE_URL"])
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(DB_PATH, timeout=30)
@@ -18,6 +22,9 @@ def connect():
 
 
 def migrate():
+    if cloud.enabled():
+        from .postgres import migrate as migrate_postgres
+        return migrate_postgres(os.environ["DATABASE_URL"])
     with connect() as db:
         version = db.execute("PRAGMA user_version").fetchone()[0]
         if version < 1:

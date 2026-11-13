@@ -15,7 +15,7 @@ from pathlib import Path
 
 import imageio_ffmpeg
 from fastapi import HTTPException
-from . import db, ai
+from . import db, ai, cloud
 
 MAX_VIDEO = 200 * 1024 * 1024
 LOCK = threading.RLock()
@@ -99,6 +99,8 @@ def accept(path, owner, project, title, when, intake='upload'):
             return existing[0]
         original = path.name.split('__', 1)[-1]
         path.replace(target)
+        if cloud.enabled():
+            cloud.put("video/"+name, target)
         try:
             cur = conn.execute("INSERT INTO meetings(owner_id,project_id,title,meeting_at,source_type,status,video_name,original_name,content_hash,video_format,video_size,audio_duration,intake,auto_date) VALUES(?,?,?,?,'video','uploaded',?,?,?,?,?,?,?,?)", (owner, project, title, when, name, original, digest, kind, target.stat().st_size, duration, intake, int(intake == 'folder')))
             mid = cur.lastrowid
@@ -139,16 +141,16 @@ def recover(conn):
         conn.execute('UPDATE meetings SET status=?,stage=NULL,error=? WHERE id=?', (state, 'Обработка прерывалась три раза. Повторите обработку.' if state == 'error' else None, job['meeting_id']))
 
 
-def process_one():
+def process_one(meeting_id=None):
     with LOCK, db.connect() as conn:
         conn.execute('BEGIN IMMEDIATE')
         recover(conn)
-        row = conn.execute("SELECT m.*,u.display_name,u.aliases,p.name AS project_name FROM jobs j JOIN meetings m ON m.id=j.meeting_id AND m.owner_id=j.owner_id JOIN users u ON u.id=m.owner_id JOIN projects p ON p.id=m.project_id AND p.owner_id=m.owner_id WHERE j.state='uploaded' ORDER BY m.id LIMIT 1").fetchone()
+        row = conn.execute("SELECT m.*,u.display_name,u.aliases,p.name AS project_name FROM jobs j JOIN meetings m ON m.id=j.meeting_id AND m.owner_id=j.owner_id JOIN users u ON u.id=m.owner_id JOIN projects p ON p.id=m.project_id AND p.owner_id=m.owner_id WHERE j.state='uploaded' AND (CAST(? AS BIGINT) IS NULL OR m.id=?) ORDER BY m.id LIMIT 1", (meeting_id, meeting_id)).fetchone()
         if not row:
             return False
         m = dict(row)
         token = uuid.uuid4().hex
-        conn.execute("UPDATE jobs SET state='processing',attempt=attempt+1,token=?,lease=? WHERE meeting_id=?", (token, time.time()+30, m['id']))
+        conn.execute("UPDATE jobs SET state='processing',attempt=attempt+1,token=?,lease=? WHERE meeting_id=?", (token, time.time()+(420 if cloud.enabled() else 30), m['id']))
         conn.execute("UPDATE meetings SET status='processing',stage='Извлечение аудио',attempts=attempts+1,error=NULL WHERE id=?", (m['id'],))
     done = threading.Event()
     def heartbeat():
@@ -156,14 +158,22 @@ def process_one():
             with db.connect() as conn:
                 conn.execute('UPDATE jobs SET lease=? WHERE meeting_id=? AND token=?', (time.time()+30, m['id'], token))
     beat = threading.Thread(target=heartbeat, daemon=True)
-    beat.start()
+    if not cloud.enabled():
+        beat.start()
     temporary = directory('work') / (token + '.wav')
+    source_path = None
     audio_target = None
     segments = None
     try:
         if not ai.key_present():
             raise ValueError('Администратору нужно настроить ключ OpenAI')
-        subprocess.run([ffmpeg(), '-y', '-v', 'error', '-i', str(safe(directory('video') / m['video_name'])), '-map', '0:a:0', '-vn', '-c:a', 'pcm_s32le', str(temporary)], check=True, capture_output=True, timeout=120)
+        source_path = safe(directory('video') / m['video_name']) if m['source_type'] == 'video' else safe(db.AUDIO_DIR / m['audio_name'])
+        if cloud.enabled():
+            cloud.download(('video/' if m['source_type'] == 'video' else 'audio/')+source_path.name, source_path)
+        if m['source_type'] == 'audio':
+            temporary = source_path
+        else:
+            subprocess.run([ffmpeg(), '-y', '-v', 'error', '-i', str(source_path), '-map', '0:a:0', '-vn', '-c:a', 'pcm_s32le', str(temporary)], check=True, capture_output=True, timeout=120)
         def stage(text):
             with db.connect() as conn:
                 conn.execute('UPDATE meetings SET stage=? WHERE id=? AND EXISTS(SELECT 1 FROM jobs WHERE meeting_id=? AND token=?)', (text, m['id'], m['id'], token))
@@ -181,9 +191,12 @@ def process_one():
                 return True
             audio_name = m['audio_name'] or (uuid.uuid4().hex + '.wav')
             audio_target = safe(db.AUDIO_DIR / audio_name)
-            temporary.replace(audio_target)
+            if m["source_type"] == "video":
+                temporary.replace(audio_target)
+                if cloud.enabled():
+                    cloud.put("audio/"+audio_name,audio_target)
             sync_tasks(conn, m, results)
-            conn.execute("UPDATE meetings SET status='ready',stage=NULL,error=NULL,results=?,audio_name=?,audio_format='wav',processed_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(results, ensure_ascii=False), audio_name, m['id']))
+            conn.execute("UPDATE meetings SET status='ready',stage=NULL,error=NULL,results=?,audio_name=?,audio_format=?,processed_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(results, ensure_ascii=False), audio_name, "wav" if m["source_type"] == "video" else m["audio_format"], m['id']))
             conn.execute("UPDATE jobs SET state='ready',interruptions=0,token=NULL,lease=NULL WHERE meeting_id=? AND token=?", (m['id'], token))
     except Exception as exc:
         from openai import APIConnectionError, AuthenticationError, PermissionDeniedError, RateLimitError
@@ -205,9 +218,16 @@ def process_one():
                 conn.execute("UPDATE jobs SET state='error',token=NULL,lease=NULL WHERE meeting_id=? AND token=?", (m['id'], token))
     finally:
         segments = None
-        temporary.unlink(missing_ok=True)
+        if m["source_type"] == "video" or cloud.enabled():
+            temporary.unlink(missing_ok=True)
+        if cloud.enabled():
+            if source_path:
+                source_path.unlink(missing_ok=True)
+            if audio_target:
+                audio_target.unlink(missing_ok=True)
         done.set()
-        beat.join()
+        if beat.is_alive():
+            beat.join()
     return True
 
 
