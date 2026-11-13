@@ -15,7 +15,11 @@ def missing():
     keys = REQUIRED
     if os.getenv('MEETING_QUEUE_PROVIDER') == 'vercel':
         keys = tuple(key for key in keys if key not in ('QSTASH_TOKEN','MEETING_WORKER_SECRET','MEETING_PUBLIC_URL'))
-    return [key for key in keys if not os.getenv(key)]
+    absent = [key for key in keys if not os.getenv(key)]
+    url = os.getenv('DATABASE_URL', '')
+    if url.startswith(('postgresql://', 'postgres://')) and not urlparse(url).password and not os.getenv('MEETING_DATABASE_PASSWORD'):
+        absent.append('MEETING_DATABASE_PASSWORD')
+    return absent
 
 
 def storage():

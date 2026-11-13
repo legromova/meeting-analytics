@@ -1,5 +1,6 @@
 """Optional PostgreSQL adapter. SQLite remains the default for local Windows."""
 import ast
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -33,10 +34,18 @@ class Cursor:
             yield row
 
 
+def connection_options():
+    options = {'connect_timeout': 10, 'prepare_threshold': None}
+    password = os.getenv('MEETING_DATABASE_PASSWORD')
+    if password:
+        options['password'] = password
+    return options
+
+
 class Connection:
     def __init__(self, url):
         import psycopg
-        self.conn = psycopg.connect(url, connect_timeout=10, prepare_threshold=None)
+        self.conn = psycopg.connect(url, **connection_options())
         self.conn.execute('SET search_path TO meeting_app, public')
 
     def execute(self, sql, args=()):
@@ -87,7 +96,7 @@ def migrate(url):
     base = base.replace('INTEGER PRIMARY KEY', 'BIGSERIAL PRIMARY KEY').replace(' COLLATE NOCASE','')
     base = base.replace("('audio','text')", "('audio','text','video')")
     base = base.replace('CURRENT_TIMESTAMP', "(to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD HH24:MI:SS'))")
-    with psycopg.connect(url, connect_timeout=10, prepare_threshold=None) as conn:
+    with psycopg.connect(url, **connection_options()) as conn:
         conn.execute('SELECT pg_advisory_xact_lock(735102)')
         conn.execute('CREATE SCHEMA IF NOT EXISTS meeting_app')
         conn.execute('SET search_path TO meeting_app, public')

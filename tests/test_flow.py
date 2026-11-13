@@ -435,3 +435,19 @@ def test_cloud_and_local_dependency_manifests_match():
     local=[line.strip() for line in Path('requirements.txt').read_text(encoding='utf-8').splitlines() if line.strip() and not line.startswith('#')]
     assert project['project']['dependencies']==local
     assert project['tool']['vercel']['subscribers']==[{'entrypoint':'worker'}]
+
+
+def test_separate_cloud_database_password_supports_special_characters(monkeypatch):
+    from meeting_app import cloud
+    from meeting_app.postgres import connection_options
+    monkeypatch.setenv('DATABASE_URL','postgresql://postgres.project@db.example:6543/postgres?sslmode=require')
+    monkeypatch.delenv('MEETING_DATABASE_PASSWORD',raising=False)
+    assert 'MEETING_DATABASE_PASSWORD' in cloud.missing()
+    password='test-only @:/?#%\\quoted'
+    monkeypatch.setenv('MEETING_DATABASE_PASSWORD',password)
+    assert connection_options()['password']==password
+    assert 'MEETING_DATABASE_PASSWORD' not in cloud.missing()
+    monkeypatch.delenv('MEETING_DATABASE_PASSWORD')
+    monkeypatch.setenv('DATABASE_URL','postgresql://user:test-only@db.example/postgres')
+    assert 'password' not in connection_options()
+    assert 'MEETING_DATABASE_PASSWORD' not in cloud.missing()

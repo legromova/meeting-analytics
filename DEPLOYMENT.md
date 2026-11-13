@@ -11,7 +11,7 @@
 ## 2. База и приватные файлы Supabase
 
 1. Создайте отдельный проект в https://supabase.com/dashboard (или подключите Supabase через Vercel Marketplace). Выберите регион рядом с функцией Vercel. Пароль базы сохраните в своём менеджере паролей.
-2. Нажмите **Connect → Transaction pooler** и скопируйте PostgreSQL connection string. Подставьте пароль (специальные символы должны быть URL-encoded), сохраните строку в Vercel как `DATABASE_URL`. Используйте pooler с IPv4 и `sslmode=require`.
+2. Нажмите **Connect → Transaction pooler** и скопируйте PostgreSQL connection string. Сохраните адрес без пароля в Vercel как `DATABASE_URL`, а пароль — отдельной Secret-переменной `MEETING_DATABASE_PASSWORD`. Приложение передаёт пароль драйверу отдельно; кодировать специальные символы не нужно. Ранее настроенные URL со встроенным паролем тоже поддерживаются. Используйте pooler с IPv4 и `sslmode=require`.
 3. В **Project Settings → API / Data API** скопируйте URL проекта вида `https://…supabase.co` в переменную `SUPABASE_URL`.
 4. В **Settings → API Keys → Legacy API keys** скопируйте серверный `service_role` JWT в `SUPABASE_SERVICE_ROLE_KEY`. Он даёт административный доступ к Storage и должен оставаться только на сервере. Не используйте anon/publishable key.
 5. В **Storage → New bucket** создайте бакет `meetings`, **Public bucket выключен**. В Vercel можно задать `SUPABASE_STORAGE_BUCKET=meetings`; это значение уже используется по умолчанию.
