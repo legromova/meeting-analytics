@@ -69,6 +69,9 @@ def put(path, source):
 
 def download(path, destination, limit=None):
     limit = upload_limit() if limit is None else limit
+    # Queue workers run in a fresh filesystem, separately from the upload API.
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
     base, bucket = storage()
     size = 0
     with httpx.Client(timeout=120, trust_env=False) as client:

@@ -1,6 +1,7 @@
 """Durable video intake and worker. No speech text is persisted."""
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -220,6 +221,16 @@ def process_one(meeting_id=None):
             conn.execute("UPDATE meetings SET status='ready',stage=NULL,error=NULL,results=?,audio_name=?,audio_format=?,processed_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(results, ensure_ascii=False), audio_name, playback_format, m['id']))
             conn.execute("UPDATE jobs SET state='ready',interruptions=0,token=NULL,lease=NULL WHERE meeting_id=? AND token=?", (m['id'], token))
     except Exception as exc:
+        # Never log the exception message/traceback: providers may include speech,
+        # signed URLs or credentials. Class and last code location suffice.
+        trace = exc.__traceback__
+        while trace and trace.tb_next:
+            trace = trace.tb_next
+        logging.getLogger(__name__).error(
+            'meeting_processing_failed meeting_id=%s exception=%s module=%s line=%s',
+            m['id'], type(exc).__name__,
+            Path(trace.tb_frame.f_code.co_filename).name if trace else 'unknown',
+            trace.tb_lineno if trace else 0)
         from openai import APIConnectionError, AuthenticationError, PermissionDeniedError, RateLimitError
         if isinstance(exc, ValueError) and str(exc) in ('В записи не обнаружена речь', 'Администратору нужно настроить ключ OpenAI'):
             error = str(exc)

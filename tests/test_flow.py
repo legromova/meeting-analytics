@@ -20,6 +20,19 @@ def wav_bytes(seconds=1):
     return output.getvalue()
 
 
+def test_cloud_download_creates_fresh_worker_audio_directory(tmp_path, monkeypatch):
+    import httpx
+    from meeting_app import cloud
+    real_client = httpx.Client
+    monkeypatch.setattr(cloud, 'storage', lambda: ('https://storage.invalid', 'meetings'))
+    monkeypatch.setattr(cloud, 'headers', lambda: {})
+    monkeypatch.setattr(cloud.httpx, 'Client', lambda **kwargs: real_client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b'original-audio'))))
+    destination = tmp_path / 'fresh-worker' / 'audio' / 'recording.wav'
+    cloud.download('audio/recording.wav', destination)
+    assert destination.read_bytes() == b'original-audio'
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DATA_DIR", tmp_path)
